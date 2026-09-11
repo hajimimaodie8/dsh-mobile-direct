@@ -1,0 +1,20 @@
+# dsh-mobile-direct bundle layer.
+#
+# One row. It mounts this plugin on the harness's own web server: a top-right
+# badge whose panel serves the pairing QR (for the DSH Mobile app) and a
+# one-tap browser entry (for any phone browser), both built with the LAN
+# address the phone can actually reach.
+#
+# `relayPort` / `relayScheme` must describe the dsh-relay listener the phone will
+# talk to. `lanAddress` pins the advertised address when the automatic choice
+# picks a virtual adapter (VMware, Hyper-V, WSL all carry private addresses);
+# left empty, the panel's dropdown decides and remembers the choice in
+# `$DSH_HOME/mobile-direct/settings.json`.
+- insert:
+    - id: mobile-direct
+      name: 'dsh-mobile-direct'
+      config:
+        relayPort: !!js Number(process.env.DSH_MOBILE_DIRECT_RELAY_PORT ?? 3443)
+        relayScheme: !!js process.env.DSH_MOBILE_DIRECT_RELAY_SCHEME ?? 'http'
+        lanAddress: ''
+        badge: true
