@@ -1,6 +1,6 @@
 url: https://github.com/hajimimaodie8/dsh-mobile-direct
 name: hajimimaodie8/dsh-mobile-direct
-category: mobile
+category: remote
 description:
-  en: Scan-once mobile entry — a QR in the top-right of the harness web UI that pairs the DSH Mobile app (device token, 30 days) or opens a one-tap browser session, always carrying a LAN address the phone can actually reach.
-  zh: 手机扫码直连 —— 在 harness 界面右上角给出二维码，手机 App 扫一次即完成配对（设备令牌，默认 30 天免配），手机浏览器扫另一个码点一下即进；二维码里的地址始终是手机真正可达的局域网 IP。
+  en: 'Scan-once mobile entry — a QR in the top-right of the harness web UI that pairs the DSH Mobile app (device token, 30 days) or opens a one-tap browser session, always carrying a LAN address the phone can actually reach.'
+  zh: '手机扫码直连 —— 在 harness 界面右上角给出二维码，手机 App 扫一次即完成配对（设备令牌，默认 30 天免配），手机浏览器扫另一个码点一下即进；二维码里的地址始终是手机真正可达的局域网 IP。'
