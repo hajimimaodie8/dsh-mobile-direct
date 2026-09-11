@@ -2,142 +2,111 @@
 
 **一次扫码，手机直接进入电脑上的 DeepSeek Harness。**
 
-在 harness 网页界面右上角放一个二维码入口：手机 App 扫一下就完成配对（拿到设备令牌，默认 30 天免配对）；手机浏览器扫另一个码，点一下就能进入——不留密码、不装证书、不填端口。
+在 harness 网页界面右上角放一个二维码入口：
+
+- **手机 App**（DSH Mobile）扫一下即完成配对，拿到设备令牌（默认 30 天，之后不用再扫）；
+- **手机浏览器**扫另一个码，直接进入——不输密码、不点确认、不装证书。
 
 ---
 
-## 它解决的问题
+## 它解决的两个真实问题
 
-`dsh-relay` 已经会配对：`/relay/pair` 会渲染一个二维码，客户端（DSH Mobile App，或任何实现 relay `CLIENT_INTEGRATION` 的客户端）读它、认领里面的配对码、换到设备令牌。
+### 一、二维码里的地址不能用
 
-它唯一做不到的，是**把正确的地址放进那个二维码**。relay 用「你打开这个页面时用的 `Host`」来拼载荷——而所有人都是在那台跑 harness 的电脑上、用 `http://127.0.0.1:3443/relay/pair` 打开的，于是二维码里装的是 `127.0.0.1`，手机扫了等于让手机连它自己。
+harness 的配对二维码如果由 `dsh-relay` 生成，里面的地址取自"你打开那个页面时用的 `Host`"。而所有人都是在跑 harness 的那台电脑上、用 `http://127.0.0.1:3443/relay/pair` 打开的，于是二维码里装的是 `127.0.0.1`——手机扫了等于让手机连它自己。
 
-本插件只补这一环：
+本插件改为**自己签发配对码、自己拼载荷**，把地址写成本机真正可达的局域网地址。
 
-- 通过 loopback 以**操作者**身份向 relay 取一个实时配对码（relay 因此才会签发），同时在 `Host` 头里声明**局域网地址**——这样拼出来的载荷里是手机真正能访问的地址；
-- 把载荷渲染成二维码（App 用），再给一个浏览器用的入口二维码（`/relay/pair?code=…`，点一下就进）；
-- 在右上角面板里让你**选择要广播的本机地址**，因为装了 VMware / Hyper-V / WSL 的机器有好几个私有地址，只有一个在手机所在的网络里。
+### 二、更根本的：`/api` 全是 401
 
-它**不**自己实现代理、隧道或鉴权：手机唯一要连的仍然是 relay，拿到的也是 relay 自己的令牌。
+Harness **0.1.2 起了鉴权**：整个 `/api` 面（每个一元调用 + 两条 WebSocket 上行）都要求一个**签名且绑定 authority 的 cookie**，没有就 401。手机拿不到它——启动令牌每个进程只打印一次、只在 index 路由上接受、且从不持久化。
+
+所以中间必须有**一个跑在这台机器上的东西**替你签这个 cookie。这正是这条路能通的关键。
+
+> `dsh-relay` 0.2.1 做不到这件事：它的类型面（`lib/types/harness-session.d.ts`）明确写了"relay 应从 `ctx.credentials` 读密钥、自己签一个 harness 会话 cookie 给上游"，但它的运行时里没有这个实现——`lib/index.js` 把客户端的 `Authorization`/`Cookie` 删掉后原样转发（`RELAY_ONLY`），上游请求只改了 `Host`。于是**配对能成功，之后每个 `/api` 调用都是 401**。（本插件因此不再依赖它。）
 
 ---
+
+## 工作原理
+
+```
+手机 ──http──▶ dsh-mobile-direct :3444 ──重新签发会话──▶ harness 127.0.0.1:<port>
+                ├─ /relay/health      {service:"dsh-relay",ok:true}
+                ├─ /relay/pair        配对：JSON 契约，换设备令牌
+                ├─ /relay/devices     已配对设备与撤销（仅本机）
+                ├─ /?k=<一次性密钥>    浏览器一键进入（落 cookie 后 302 到 /）
+                └─ 其它一切 ──代理（含 WebSocket）──▶ harness
+```
+
+- 会话 cookie 按 `@deepseek-ai/dsh-client-connection` 的规格现签现用：
+  `dsh-auth-<base64url(sha256(authority))> = v1.<payload>.<HMAC-SHA256(secret, body)>`，
+  密钥从 harness 自己的凭据记录 `client-connection/browser-session` 读取（优先走 `ctx.credentials`，回退到 `$DSH_HOME/.credentials.yaml`）。
+- 手机侧的身份校验：**设备令牌**（App）、**一次性密钥换来的签名 cookie**（浏览器），或 loopback（操作者）。其它一律 403。
+- 本插件**不监听公网、不存储你的 harness 凭据**，也不改动 harness 自身。
 
 ## 依赖
 
 | 依赖 | 说明 |
 | --- | --- |
-| **dsh-relay** ≥ 0.2.0 | **必需**。它是底层通道：TLS/明文监听、`/relay/pair`、设备令牌、以及**服务端代签 harness 会话 cookie**——这正是纯 `http://` + IP 的浏览器进不去的原因（harness 0.1.2 的会话 cookie 是 `Secure` 的，浏览器在明文 http 上存不住，必须由服务端代签；dsh-pocket 的局域网入口卡在这一点上，见其 issue #91）。 |
-| DeepSeek Harness ≥ 0.1.2 | 提供 `webServer` 路由与 index 注入缝。 |
+| DeepSeek Harness ≥ 0.1.2 | 提供 `webServer` 路由与 index 注入缝；也是它要求那个会话 cookie。 |
 | Node ≥ 22.19 或 ≥ 24 | 跟随 harness 运行时。 |
-
----
+| `dsh-relay` | **不再必需**。只有把 `entryMode` 设为 `'relay'`（用它的配对页出码）时才需要。 |
 
 ## 安装
 
 ```sh
-# 1) 先装底层通道
-dsh plugin --profile web add dsh-relay
-# 2) 再装本插件
 dsh plugin --profile web add dsh-mobile-direct
-# 3) 重启 harness
+# 然后重启 harness
 ```
 
-通过插件市场安装（可选）：重启后在 **设置 → 插件市场** 里搜索 `dsh-mobile-direct`，一键安装，然后重启。
-
-装好后不需要任何配置。右上角会出现 **「手机直连」** 按钮。
-
-> ⚠️ 如果你之前用 `file://` 开发方式在 `profiles/web/cordis.patch.yml` 里插过一行 `mobile-direct`，**请先删掉那一行**再安装正式包，否则两个同 id 的 row 会冲突。
-
----
+装好后不需要任何配置。右上角出现 **「手机直连」**：点开 →「App 配对」用 App 扫；「手机浏览器」用相机扫。
 
 ## 使用
 
-点右上角 **「手机直连」**：
+1. **App**：`DSH Mobile → 中继 → 配对中继` → 扫「App 配对」那个码。载荷是：
 
-### ① App 配对（推荐，一次就好）
+   ```json
+   {
+     "v": 1,
+     "kind": "dsh-relay-pair",
+     "url": "http://192.168.1.6:3444",
+     "code": "02602725",
+     "expiresAt": 1789142081733
+   }
+   ```
 
-1. 手机打开 **DSH Mobile** → `Relay → Pair a relay`；
-2. 扫面板里的二维码。
+   App 会用 `POST {url}/relay/pair`（JSON，`{code, name}`）换 `{deviceId, token, expiresAt}`，之后所有 `/api` 与两条 WebSocket 都带这个令牌。
 
-App 会读到一个 JSON 载荷：
+2. **浏览器**：扫「手机浏览器」那个码 → 直接进入（链接里带一次性密钥，用掉即失效并落成签名 cookie）。
 
-```json
-{
-  "v": 1,
-  "kind": "dsh-relay-pair",
-  "url": "http://192.168.1.6:3443",
-  "code": "27157965",
-  "expiresAt": 1789140086869
-}
-```
-
-然后用 `POST {url}/relay/pair`（`Content-Type: application/json`，body `{code, name}`）换取 `{deviceId, token, expiresAt}`，之后所有 `/api` 调用与两条 WebSocket 上行都带这个令牌。**配对成功后不用再扫**——令牌默认 30 天，到期才需要重配。
-
-> 载荷字段与版本号是这个 App 硬校验的：`kind` 必须是 `dsh-relay-pair`，`v` 不能高于 1。本插件按此生成，并跟随 relay 的默认值（`pairingCodeLength: 8`、`pairingWindowMs` 默认 5 分钟，本仓库文档建议放宽到 15 分钟）。
-
-### ② 手机浏览器进入
-
-切到面板的 **「手机浏览器」** 标签，用手机相机/浏览器扫那个码：它会打开 `/relay/pair?code=…`（配对码已填好），**点一下 `Pair`** 就进去了，不需要密码。
-
-### 地址选错了怎么办
-
-面板底部的下拉框列出本机所有候选地址（含网卡名）。选对之后会记住（写在 `$DSH_HOME/mobile-direct/settings.json`），也可用配置项 `lanAddress` 固定。
-
----
+3. **管理**：面板里的「设备」链接（或 `http://<局域网地址>:3444/relay/devices`，仅本机可访问）→ 逐个撤销。
 
 ## 配置（全部可选）
-
-写在 profile 的 `cordis.patch.yml` 里（按 id 覆盖，会整体替换 config，所以要把想保留的项都写上）：
 
 ```yaml
 - id: mobile-direct
   config:
-    relayPort: 3443        # relay 的监听端口
-    relayScheme: 'http'    # 与 relay 的 tls 设置一致：'off' → http，自签/证书 → https
-    lanAddress: '192.168.1.6'  # 固定广播地址；留空则由面板下拉选择
-    badge: true            # 是否注入右上角入口
+    entryMode: 'direct'   # 'direct' = 本插件自己的入口（推荐）；'relay' = 用 dsh-relay 出码
+    entryEnabled: true    # 关掉则只剩界面面板，不再监听
+    entryPort: 3444       # 入口端口
+    entryBind: '0.0.0.0'  # 绑定地址
+    lanAddress: ''        # 固定广播的局域网地址；留空则自动挑选并在面板里可切换
+    badge: true           # 是否注入右上角入口
 ```
 
-## 接口
+## 已知边界
 
-| 路径 | 说明 |
-| --- | --- |
-| `GET /mobile-direct/state.json` | 状态、候选地址、载荷、配对码、两个入口 URL，以及内联的二维码 data URL。`?refresh=1` 换一个新码，`?qr=browser` 让二维码指向浏览器入口。 |
-| `GET /mobile-direct/qr.svg` | 直接返回二维码 SVG（`?target=browser` 切到浏览器入口）。 |
-| `POST /mobile-direct/address` | `{"address":"192.168.1.6"}`，记住要广播的地址。 |
-| `GET /mobile-direct/` | 一个朴素的说明页。 |
-
-这些路由都在 harness 自己的 web server 上，所以也能通过 relay 的 origin 访问到。
-
----
-
-## 安全
-
-- 本插件自身**不监听任何端口**，也不持有任何凭据；它只是把 relay 已经签发的配对码写进二维码。
-- 手机最终拿到的凭据是 **relay 的设备令牌**，与手动配对完全等价，随时可在 `http://<地址>:3443/relay/devices` 逐个撤销。
-- 若 relay 用 `tls: 'off'`（明文 http），局域网内传输是明文的——适合家里自用，**公共/公司 WiFi 请不要这么配**；改回自签证书或自有证书即可加密（此时 App 会按二维码里的 `fingerprint` 做公钥固定，不需要你装 CA）。
-- 配对码是**一次性**的，5～15 分钟内有效；面板上的「换一个码」会立即作废旧码。
-
----
+- **版本匹配很重要**：DSH Mobile App 自己的兼容表写明 —— `0.10.0` 对应 harness `0.1.3-alpha.1`，`0.9.x` 对应 `0.1.2-alpha.1`，**两者不能互换**（0.10.0 的 App 对 0.1.2 的 harness 会请求 `session/follow` 这个 0.1.2 不认识的流，并给 `commands/execute` 传一个 0.1.2 未声明的参数）。本插件解决的是"配对与鉴权"，**版本错配仍需自行对齐**。
+- 明文 `http://`：局域网内传输是明文的（家用可以；公共 WiFi 请不要这么用）。要做加密需要给入口配证书，并让 App 侧信任——目前不在本插件范围内。
+- 入口只面向局域网；不要把它转发到公网。
 
 ## 开发
 
 ```sh
-npm install          # 只有一个运行时依赖 qrcode
+npm install
 ```
 
-在本机调试时不需要反复重启 harness——用 profile 的 patch 层以 `file://` 热加载即可（**注意 Windows 路径里的空格要转义为 `%20`**）：
-
-```yaml
-- insert:
-    - id: mobile-direct
-      name: 'file:///D:/deepseek%20harness/dsh-mobile-direct/lib/index.js'
-      config:
-        relayPort: 3443
-        relayScheme: 'http'
-```
-
-本地源码目录里需要有 `node_modules/qrcode`（开发期从 profile 的 `node_modules/qrcode` 做个 junction 即可）。
+用 profile 的 patch 层以 `file://` 热加载时注意两点：Windows 路径里的空格要写 `%20`；**ESM 模块按 URL 缓存**，改代码后要么换一个新路径（如复制到 `build/lib/`），要么重启 harness——只改查询串不一定生效。
 
 ## 许可
 
@@ -145,6 +114,6 @@ MIT。
 
 ## 致谢
 
-- [`dsh-relay`](https://github.com/sorsama/deepseek-harness-relay)（sorsama）——底层通道与 `/relay/pair` 契约，以及「服务端代签 harness 会话」这一关键设计。
-- [DSH Mobile](https://github.com/sorsama/deepseek-harness-mobile)（sorsama）——本插件的载荷格式即按其 `core/wire/RelayPairing.kt` 的解析规则对齐。
-- [dsh-pocket](https://github.com/shaobeichen/dsh-pocket)（shaobeichen）——「手机访问」这一交互形态的先例。
+- [`dsh-relay`](https://github.com/sorsama/deepseek-harness-relay)（sorsama）——`/relay/*` 的接口形态与 `CLIENT_INTEGRATION` 契约；本插件按同一契约实现，以便 App 无需改动。
+- [DSH Mobile](https://github.com/sorsama/deepseek-harness-mobile)（sorsama）——载荷解析规则以它的 `core/wire/RelayPairing.kt` 为准。
+- `@deepseek-ai/dsh-client-connection`——会话 cookie 的权威规格。

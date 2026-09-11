@@ -32,6 +32,7 @@
     "node": "^22.19.0 || >=24"
   },
   "dependencies": {
+    "js-yaml": "^4.1.0",
     "qrcode": "^1.5.4"
   },
   "dsh": {
